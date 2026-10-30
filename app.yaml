@@ -1,0 +1,14 @@
+# How Databricks starts the app, and which values it injects as environment variables.
+command: ["streamlit", "run", "app.py"]
+
+env:
+  # valueFrom = the NAME you gave the resource under the app's "Resources" (not the value itself)
+  - name: 'DATABRICKS_WAREHOUSE_ID'
+    value: '04a9d767cfca852b'
+  - name: 'WAREHOUSE_HTTP_PATH'
+    value: '/sql/1.0/warehouses/04a9d767cfca852b'
+  - name: ANALYSIS_JOB_ID
+    value: 486792958029741         # resource: the Job that runs the notebook, permission "Can manage run"
+  # plain value: the Unity Catalog Volume folder where the notebook writes results (the app's identity needs read/write)
+  - name: RESULTS_ROOT
+    value: /Volumes/battery_sandbox/emily_zeiberg/driver_analysis

@@ -1,0 +1,5 @@
+# Streamlit and the Databricks SDK come pre-installed in Databricks Apps; these lower bounds ask for the features used:
+#   streamlit >= 1.37  ->  st.context.headers and st.fragment(run_every=...)
+streamlit>=1.37
+databricks-sdk>=0.40.0
+pandas
