@@ -172,8 +172,17 @@ def step2_choose_columns(columns):
     grouping = c2.selectbox("Grouping column (optional)", columns, index=None, placeholder="None - rows are independent",
                             help="Rows that belong to the same unit, e.g. the same machine, customer or battery cell. "
                                  "Leave empty if rows are independent.")
-    excluded = st.multiselect("Columns to exclude (e.g. IDs)", columns)
-    return target, grouping, excluded
+    # The target and grouping columns are always used, so they are not offered here.
+    others = [c for c in columns if c not in (target, grouping)]
+    st.caption("The target and grouping columns are always used. Choose the OTHER columns the analysis may use to explain the "
+               "target (leave out IDs and anything that is really a result of the target). "
+               "Changing the target or grouping column resets this list.")
+    if st.checkbox("Include all other columns"):
+        included = others
+        st.caption(f"{len(included)} columns included.")
+    else:
+        included = st.multiselect("Columns to include", others)
+    return target, grouping, included
 
 
 # =====================================================================================================
@@ -182,8 +191,9 @@ def step2_choose_columns(columns):
 def step3_filters(columns, table_key):
     """A small editable table: one row per filter. Returns a list of {column, op, value} dicts."""
     st.header("3. Filter rows (optional)")
-    st.caption("Add rows with the + at the bottom of the table. For 'in', separate values with commas. "
-               "Dates can be typed like 2025-01-31.")
+    st.caption("Add rows with the + at the bottom of the table. Filters can use ANY column, even ones you did not include. "
+               "'contains' ignores upper/lower case and only works on text columns. "
+               "For 'in', separate values with commas. Dates can be typed like 2025-01-31.")
     empty = pd.DataFrame({"column": pd.Series(dtype="object"), "op": pd.Series(dtype="object"),
                           "value": pd.Series(dtype="object")})
     edited = st.data_editor(
@@ -199,7 +209,7 @@ def step3_filters(columns, table_key):
 # =====================================================================================================
 # 4. Check the selection and run
 # =====================================================================================================
-def step4_check_and_run(source, kinds, null_pct, target, grouping, excluded, filters):
+def step4_check_and_run(source, kinds, null_pct, target, grouping, included, filters):
     st.header("4. Check and run")
     errors, warnings = [], []
 
@@ -208,17 +218,18 @@ def step4_check_and_run(source, kinds, null_pct, target, grouping, excluded, fil
         errors.append("Choose a target column.")
     if target is not None and target == grouping:
         errors.append("The target and the grouping column must be different.")
-    if target is not None and target in excluded:
-        errors.append("The target column cannot also be excluded.")
-    if grouping is not None and grouping in excluded:
-        errors.append("The grouping column cannot also be excluded.")
+    if not included:
+        errors.append("Choose at least one column to include.")
     if target is not None and null_pct[target] > 30:
         warnings.append(f"The target is {null_pct[target]:.0f}% null (first 100,000 rows); those rows will be dropped.")
 
     # --- build the SQL, then rules that need the data (queries are cached, so reruns are cheap)
     sql = None
+    select_cols = None                      # target + grouping + the included columns; None (= all columns) until those are chosen
+    if target is not None and included:
+        select_cols = [target] + ([grouping] if grouping else []) + included
     try:
-        sql = sb.build_sql(source.source_q, filters, kinds)
+        sql = sb.build_sql(source.source_q, filters, kinds, select_cols)
     except ValueError as e:
         errors.append(str(e))
 
@@ -252,7 +263,7 @@ def step4_check_and_run(source, kinds, null_pct, target, grouping, excluded, fil
             return
         label = source.label + (f" ({len(filters)} filter{'s' if len(filters) != 1 else ''})" if filters else "")
         try:
-            run_id = dbx.start_run(sql, target, grouping, excluded, config={}, run_label=label)
+            run_id = dbx.start_run(sql, target, grouping, [], config={}, run_label=label)   # the SQL already selects only the chosen columns
         except Exception as e:
             st.error(f"Could not start the job: {e}")
             return
@@ -339,9 +350,9 @@ def main():
     kinds = {name: sb.column_kind(t) for name, t in zip(source.columns_df["name"], source.columns_df["type"])}
 
     null_pct = step1_overview(source)
-    target, grouping, excluded = step2_choose_columns(columns)
+    target, grouping, included = step2_choose_columns(columns)
     filters = step3_filters(columns, table_key=source.key)
-    step4_check_and_run(source, kinds, null_pct, target, grouping, excluded, filters)
+    step4_check_and_run(source, kinds, null_pct, target, grouping, included, filters)
 
 
 main()

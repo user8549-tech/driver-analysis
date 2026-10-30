@@ -12,12 +12,13 @@ import re
 from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
 
-OPERATORS = ["=", "!=", ">", ">=", "<", "<=", "in", "is null", "is not null"]
+OPERATORS = ["=", "!=", ">", ">=", "<", "<=", "contains", "in", "is null", "is not null"]
 MAX_IN_VALUES = 500
 
 _NUMERIC_TYPES = {"tinyint", "smallint", "int", "integer", "bigint", "long", "short", "byte",
                   "float", "real", "double", "decimal", "dec", "numeric"}
-_TEXT_TYPES = {"string", "varchar", "char", "date", "timestamp", "timestamp_ntz", "timestamp_ltz"}
+_TEXT_TYPES = {"string", "varchar", "char"}
+_DATETIME_TYPES = {"date", "timestamp", "timestamp_ntz", "timestamp_ltz"}
 
 
 def quote_ident(name: str) -> str:
@@ -30,14 +31,16 @@ def full_name(catalog: str, schema: str, table: str) -> str:
 
 
 def column_kind(type_text: str) -> str:
-    """Group Databricks column types into: numeric, boolean, text, unsupported."""
+    """Group Databricks column types into: numeric, boolean, text, datetime, unsupported."""
     base = re.split(r"[(<\s]", type_text.strip().lower(), maxsplit=1)[0]   # 'decimal(10,2)' -> 'decimal'
     if base in _NUMERIC_TYPES:
         return "numeric"
     if base == "boolean":
         return "boolean"
-    if base in _TEXT_TYPES:          # dates / timestamps compare fine against a quoted string
+    if base in _TEXT_TYPES:
         return "text"
+    if base in _DATETIME_TYPES:      # compared against a quoted string like '2025-01-31', but not usable with 'contains'
+        return "datetime"
     return "unsupported"             # array, map, struct, binary, variant, interval, ...
 
 
@@ -58,8 +61,13 @@ def to_literal(raw: str, kind: str, column: str) -> str:
         if lowered in ("false", "0"):
             return "false"
         raise ValueError(f"'{raw}' is not true/false (filter on {column!r})")
-    # text: escape backslashes first (Spark treats them as escapes), then double the single quotes
+    # text and datetime: escape backslashes first (Spark treats them as escapes), then double the single quotes
     return "'" + raw.replace("\\", "\\\\").replace("'", "''") + "'"
+
+
+def _like_escape(text: str) -> str:
+    """Make %, _ and backslash match themselves inside a LIKE pattern (Spark's default LIKE escape character is a backslash)."""
+    return text.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
 
 
 def clean_filters(rows: list) -> list:
@@ -88,6 +96,13 @@ def build_condition(flt: dict, column_kinds: dict) -> str:
     if raw == "":
         raise ValueError(f"The filter on {column!r} needs a value")
 
+    if op == "contains":
+        if kind != "text":
+            raise ValueError(f"'contains' only works on text columns, and {column!r} is not one")
+        # case-insensitive: lower-case BOTH sides; the user's %, _ and \ are matched literally, not as wildcards
+        pattern = "%" + _like_escape(raw.lower()) + "%"
+        return f"lower({col}) LIKE {to_literal(pattern, 'text', column)}"
+
     if op == "in":
         parts = [p.strip() for p in raw.split(",") if p.strip()]
         if not parts or len(parts) > MAX_IN_VALUES:
@@ -96,10 +111,24 @@ def build_condition(flt: dict, column_kinds: dict) -> str:
     return f"{col} {op} {to_literal(raw, kind, column)}"
 
 
-def build_sql(table_full_name: str, filters: list, column_kinds: dict) -> str:
-    """SELECT * FROM <table> [WHERE (cond1) AND (cond2) ...]"""
+def build_sql(table_full_name: str, filters: list, column_kinds: dict, select_columns: list = None) -> str:
+    """
+    SELECT <columns> FROM <table> [WHERE (cond1) AND (cond2) ...]
+
+    select_columns : the columns to return (duplicates are ignored). None means all columns.
+    The WHERE part may use ANY column of the table, including ones that are not selected.
+    """
     conditions = [build_condition(f, column_kinds) for f in filters]
-    sql = f"SELECT * FROM {table_full_name}"
+    if select_columns is None:
+        sql = f"SELECT * FROM {table_full_name}"
+    else:
+        unique = list(dict.fromkeys(select_columns))
+        unknown = [c for c in unique if c not in column_kinds]
+        if unknown:
+            raise ValueError(f"Unknown column(s) selected: {unknown}")
+        if not unique:
+            raise ValueError("Select at least one column")
+        sql = "SELECT " + ",\n       ".join(quote_ident(c) for c in unique) + f"\nFROM {table_full_name}"
     if conditions:
         sql += "\nWHERE " + "\n  AND ".join(f"({c})" for c in conditions)
     return sql
