@@ -6,8 +6,10 @@ app.py - the screen. Read it top to bottom: each numbered step is one small func
   results_view.py   shows a finished run: banner, header card, warnings, drivers table, report
 
 Page flow:  1 Choose data (one table, or two tables joined) -> 2 Choose columns -> 3 Filter rows
-            -> 4 Check and run -> (run progress panel)
-The run id lives in the URL (?run_id=123), so a user can leave the page and come back to the same run.
+            -> 4 Check and run -> (run progress panel -> results)
+            or: "Open a past analysis" -> pick a saved analysis -> (the same results page)
+The URL says what to show: ?run_id=123 is a run (live progress, then results), ?past=<folder> is saved results.
+So a user can leave the page and come back to exactly the same view.
 
 Everything after step 1 works on a `Source`: the thing the analysis will read. That is either one table, or a
 sub-select that joins two tables. Steps 2-4 do not care which.
@@ -328,6 +330,66 @@ def show_run(run_id):
 
 
 # =====================================================================================================
+# Past analyses: open results that an earlier run saved
+# =====================================================================================================
+PAGE_SIZE = 30
+
+
+def current_past_name():
+    raw = st.query_params.get("past")
+    return str(raw).strip() if raw else None
+
+
+def open_past(name):
+    """Put the folder name in the URL and redraw: the page then shows those results."""
+    st.query_params["past"] = name
+    st.rerun()
+
+
+def show_past_run(name):
+    st.header(f"Past analysis {name}")
+    if st.button("Back to the list"):
+        st.query_params.clear()
+        st.rerun()
+    results_view.show_past_results(name)
+
+
+def past_runs_page():
+    st.header("Open a past analysis")
+    st.caption(f"Every analysis saved in {dbx.results_root()}, newest first. "
+               "Everyone who uses this app can see and open all of them.")
+    limit = st.session_state.get("past_limit", PAGE_SIZE)
+    try:
+        found = dbx.list_past_runs(limit)
+    except Exception as e:
+        st.error(f"Could not list the saved analyses: {e}")
+        return
+    runs = found["runs"]
+
+    if not runs:
+        st.info("No saved analyses found yet. Start one with 'Start a new analysis'.")
+    else:
+        st.dataframe(results_view.past_runs_frame(runs), hide_index=True)
+        labels = {results_view.past_run_label(r): r["folder"] for r in runs}
+        choice = st.selectbox("Choose an analysis", list(labels), index=None, placeholder="Choose an analysis to open")
+        if st.button("Open", type="primary", disabled=choice is None):
+            open_past(labels[choice])
+        if found["has_more"] and st.button("Show more"):
+            st.session_state["past_limit"] = limit + PAGE_SIZE
+            st.rerun()
+
+    st.subheader("Or open one by folder name or run id")
+    typed = st.text_input("Folder name or run id", help="The folder under the results location, which is named after the job run id.")
+    if st.button("Open this one", disabled=not typed.strip()):
+        try:
+            dbx.past_results_path(typed)               # rejects anything that is not a plain folder name
+        except ValueError as e:
+            st.error(str(e))
+        else:
+            open_past(typed.strip())
+
+
+# =====================================================================================================
 # The page
 # =====================================================================================================
 def main():
@@ -342,6 +404,16 @@ def main():
     run_id = current_run_id()
     if run_id:
         show_run(run_id)
+        return
+    past_name = current_past_name()
+    if past_name:
+        show_past_run(past_name)
+        return
+
+    what = st.radio("What would you like to do?", ["Start a new analysis", "Open a past analysis"], horizontal=True,
+                    label_visibility="collapsed")
+    if what == "Open a past analysis":
+        past_runs_page()
         return
 
     source = step1_choose_data()

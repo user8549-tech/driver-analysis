@@ -8,6 +8,7 @@ Two identities are in play:
 import io
 import json
 import os
+import re
 import time
 import uuid
 from dataclasses import dataclass
@@ -260,3 +261,55 @@ def export_run_html(run_id: int) -> str:
     if not chosen:
         raise RuntimeError("Databricks returned no exported view for this run (run results expire after 60 days)")
     return chosen[0].content
+
+
+# =====================================================================================================
+# 7. Past analyses: every folder under RESULTS_ROOT that holds a results.json
+# =====================================================================================================
+_FOLDER_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}")        # one path segment; no slashes, no leading dot or dash; use fullmatch
+NOT_RESULT_FOLDERS = {"inputs"}                                       # where long SQL files are written (see start_run)
+
+
+def results_root() -> str:
+    return os.environ["RESULTS_ROOT"].rstrip("/")
+
+
+def past_results_path(name: str) -> str:
+    """A folder name typed by the user or taken from the URL is UNTRUSTED. Returns the full folder path, or raises."""
+    name = (name or "").strip()
+    if not _FOLDER_NAME.fullmatch(name) or ".." in name or name in NOT_RESULT_FOLDERS:
+        raise ValueError(f"{name!r} is not a valid results folder name (letters, digits, '.', '_' and '-' only)")
+    return f"{results_root()}/{name}"
+
+
+def _newest_first_key(name: str):
+    """Folder names are job run ids (numbers that grow over time) or timestamps (sort alphabetically). Numbers first."""
+    return (1, int(name), "") if name.isdigit() else (0, 0, name)
+
+
+@st.cache_data(ttl=60, show_spinner=False)
+def list_past_runs(limit: int = 30) -> dict:
+    """
+    Newest-first summaries of the saved analyses, each read from the 'meta' block of its results.json.
+    Keeps reading folders until it has `limit` valid analyses; folders without a readable results.json are skipped.
+    Returns {"runs": [...], "total": candidate folders, "has_more": True if more folders could still be read}.
+    """
+    root = results_root()
+    names = [entry.name for entry in app_client().files.list_directory_contents(root)
+             if entry.is_directory and entry.name not in NOT_RESULT_FOLDERS and _FOLDER_NAME.fullmatch(entry.name)]
+    names.sort(key=_newest_first_key, reverse=True)
+    runs, has_more = [], False
+    for i, name in enumerate(names):
+        if len(runs) >= limit:
+            has_more = True
+            break
+        try:
+            results = read_results(f"{root}/{name}")
+        except Exception:                                  # not an analysis folder, or the file is damaged
+            continue
+        meta = results.get("meta") if isinstance(results.get("meta"), dict) else {}
+        runs.append({"folder": name, **{k: meta.get(k) for k in (
+            "created_utc", "label", "target", "small_data", "rows_used", "n_groups", "score_name", "val_score",
+            "baseline_score", "model_ok")}})
+    runs.sort(key=lambda r: str(r["created_utc"] or ""), reverse=True)    # ISO timestamps sort correctly as text
+    return {"runs": runs, "total": len(names), "has_more": has_more}

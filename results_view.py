@@ -9,6 +9,9 @@ Two halves, read in this order:
 
 The data comes from results.json (written by the notebook). Every field is optional: a missing field is shown as
 "-" or the block is skipped. It must never crash the page.
+
+Two entry points, ONE page: show_results() for a run that just finished, and show_past_results() for results saved by
+an earlier run. Both end up in show_results_page(), so imported results look exactly like fresh ones.
 """
 import html
 import json
@@ -177,6 +180,41 @@ def comparison_frame(records):
     return df[["model"] + [c for c in df.columns if c != "model"]] if "model" in df.columns else df
 
 
+# ---------- the list of past analyses ----------
+def past_run_label(run):
+    """One line that identifies a saved analysis in a dropdown (the folder name keeps it unique)."""
+    return " · ".join([created_text(run.get("created_utc")), str(run.get("label") or "(no label)"),
+                       str(run.get("target") or "-"), str(run.get("folder"))])
+
+
+def created_text(value):
+    """'2026-10-29T23:34:49+00:00' -> '2026-10-29 23:34'. Anything unexpected -> '-'."""
+    text = str(value or "").strip()
+    return text[:16].replace("T", " ") if len(text) >= 16 else "-"
+
+
+def past_runs_frame(runs):
+    """List of run summaries (from databricks_io.list_past_runs) -> a tidy table for display."""
+    rows = []
+    for run in as_list(runs):
+        if not isinstance(run, dict):
+            continue
+        score = num(run.get("val_score"))
+        small = run.get("small_data")
+        rows.append({
+            "Created": created_text(run.get("created_utc")),
+            "Label": run.get("label") or "-",
+            "Target": run.get("target") or "-",
+            "Mode": "Small-data" if small is True else ("Normal" if small is False else "-"),
+            "Rows": fmt_int(run.get("rows_used")),
+            "Groups": fmt_int(run.get("n_groups")),
+            "Score": "-" if score is None else f"{run.get('score_name') or 'score'} {score:.3f}",
+            "Gate": {True: "passed", False: "FAILED"}.get(run.get("model_ok"), "-"),
+            "Folder": str(run.get("folder", "-")),
+        })
+    return pd.DataFrame(rows)
+
+
 def sandboxed_iframe(report_html, height=850):
     """
     The exported notebook is HTML that needs its own scripts to draw itself, so it runs inside an iframe with
@@ -191,33 +229,63 @@ def sandboxed_iframe(report_html, height=850):
 # B. SCREEN
 # =====================================================================================================
 def show_results(run_id, status):
-    """Entry point (called from app.py when a run has succeeded). Reads results.json, then draws the page."""
+    """Entry point 1: a run that just finished. The notebook's exit value says where its results.json is."""
     results_path = results_path_from_output(status.output)
     if results_path is None:
         st.warning("The run finished, but its output does not say where the results are (no results_path).")
         st.code(status.output or "(the notebook returned no output)", language="json")
         return
+    show_results_page(results_path, key=str(run_id), run_id=run_id, raw_output=status.output)
+
+
+def show_past_results(name):
+    """Entry point 2: results saved by an earlier run, opened by the name of their folder under RESULTS_ROOT."""
+    try:
+        results_path = dbx.past_results_path(name)
+    except ValueError as e:
+        st.error(str(e))
+        return
+    # A folder named after a job run id can also show that run's notebook report (while Databricks still keeps the run).
+    run_id = int(name) if name.strip().isdigit() else None
+    show_results_page(results_path, key=f"past_{name.strip()}", run_id=run_id, raw_output=None, imported=True)
+
+
+def show_results_page(results_path, key, run_id=None, raw_output=None, imported=False):
+    """
+    The results page. `key` keeps this page's widgets apart from other pages'. `run_id` (optional) enables the
+    Full report tab. `imported` adds a note saying these are saved results from an earlier run.
+    """
     try:
         results = dbx.read_results(results_path)
     except Exception as e:
-        st.error(f"The run finished, but its results could not be read from {results_path}: {e}")
-        st.code(status.output, language="json")
+        what = "The run finished, but its results" if raw_output else "The results"
+        st.error(f"{what} could not be read from {results_path}: {e}")
+        if raw_output:
+            st.code(raw_output, language="json")
         return
 
     meta = as_dict(results.get("meta"))
+    if imported:
+        when, label = created_text(meta.get("created_utc")), meta.get("label")
+        st.info(f"These are saved results from an earlier run (created {when}" + (f", {label}" if label else "") + ").")
     tab_results, tab_report = st.tabs(["Results", "Full report"])
     with tab_results:
         show_banner(meta)
         show_header_card(meta)
         show_warnings(as_list(results.get("warnings")))
-        show_drivers(run_id, as_list(results.get("summary")))
+        show_drivers(key, as_list(results.get("summary")))
         show_model_comparison(results.get("model_comparison"))
         show_cleaning_log(as_list(results.get("clean_log")))
     with tab_report:
-        show_full_report(run_id)
+        if run_id is None:
+            st.info("The full notebook report is only available for results that came from a job run "
+                    "(a results folder named after the run id).")
+        else:
+            show_full_report(run_id)
     with st.expander("Technical details"):
         st.write(f"Results folder: {results_path}")
-        st.code(status.output, language="json")
+        if raw_output:
+            st.code(raw_output, language="json")
         if meta.get("label"):
             st.write(f"Label: {meta['label']}  |  Created: {meta.get('created_utc', '-')}")
         if meta.get("sql_query"):
@@ -264,17 +332,17 @@ def show_warnings(warnings):
         st.warning(str(text))
 
 
-def show_drivers(run_id, summary):
+def show_drivers(key, summary):
     st.subheader("Drivers")
     df = drivers_frame(summary)
     if df.empty:
         st.info("This report has no per-feature results.")
         return
     c1, c2, c3 = st.columns([2, 2, 1])
-    search = c1.text_input("Search features", key=f"drivers_search_{run_id}")
+    search = c1.text_input("Search features", key=f"drivers_search_{key}")
     clusters = sorted(df["cluster"].dropna().astype(str).unique()) if "cluster" in df.columns else []
-    chosen = c2.multiselect("Cluster", clusters, key=f"drivers_clusters_{run_id}") if clusters else []
-    only_positive = c3.checkbox("Importance > 0 only", key=f"drivers_pos_{run_id}") if "importance_mean" in df.columns else False
+    chosen = c2.multiselect("Cluster", clusters, key=f"drivers_clusters_{key}") if clusters else []
+    only_positive = c3.checkbox("Importance > 0 only", key=f"drivers_pos_{key}") if "importance_mean" in df.columns else False
 
     shown = filter_drivers(df, search, chosen, only_positive)
     st.caption(f"Showing {len(shown)} of {len(df)} features. Click a column header to sort. Green = stronger evidence.")
