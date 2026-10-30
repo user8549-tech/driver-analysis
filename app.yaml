@@ -3,6 +3,8 @@ command: ["streamlit", "run", "app.py"]
 
 env:
   # valueFrom = the NAME you gave the resource under the app's "Resources" (not the value itself)
+  - name: 'STREAMLIT_GATHER_USAGE_STATS'
+    value: 'false'
   - name: 'DATABRICKS_WAREHOUSE_ID'
     value: '04a9d767cfca852b'
   - name: 'WAREHOUSE_HTTP_PATH'

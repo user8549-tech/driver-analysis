@@ -129,6 +129,16 @@ def null_percent(who: Who, table_q: str, columns: list, sample_rows: int = 100_0
     return pd.Series({c: (0.0 if n == 0 else 100.0 * (1 - int(row[f"c{i}"]) / n)) for i, c in enumerate(columns)})
 
 
+def key_stats(who: Who, table_q: str, columns: list) -> tuple:
+    """For a join: (rows, distinct_keys) among rows where every key column is non-null (null keys never match).
+    rows == distinct_keys means each key value appears once in this table."""
+    cols = ", ".join(quote_ident(c) for c in columns)
+    not_null = " AND ".join(f"{quote_ident(c)} IS NOT NULL" for c in columns)
+    stmt = f"SELECT count(*) AS n, count(DISTINCT struct({cols})) AS d FROM {table_q} WHERE {not_null}"
+    row = query(who.name, who.client, stmt).iloc[0]
+    return int(row["n"]), int(row["d"])
+
+
 def check_user_can_run(who: Who, sql: str) -> None:
     """Run the final SQL with LIMIT 0 as the USER (not cached). Raises if they lack access or the SQL is invalid."""
     run_sql(who.client, f"SELECT * FROM (\n{sql}\n) AS t LIMIT 0")
