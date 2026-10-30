@@ -2,7 +2,8 @@
 app.py - the screen. Read it top to bottom: each numbered step is one small function.
 
   sql_builder.py    turns the user's choices into one safe SQL string      (no Databricks)
-  databricks_io.py  every call to Databricks: browse, preview, run the job  (no screen code)
+  databricks_io.py  every call to Databricks: browse, preview, run the job, read results  (no screen code)
+  results_view.py   shows a finished run: banner, header card, warnings, drivers table, report
 
 Page flow:  1 Choose data (one table, or two tables joined) -> 2 Choose columns -> 3 Filter rows
             -> 4 Check and run -> (run progress panel)
@@ -18,6 +19,7 @@ import pandas as pd
 import streamlit as st
 
 import databricks_io as dbx
+import results_view
 import sql_builder as sb
 
 st.set_page_config(page_title="Driver analysis", layout="wide")     # must be the first Streamlit call
@@ -298,8 +300,7 @@ def render_status(run_id, status):
         with st.expander("Error details", expanded=True):
             st.code(status.error or "(no error text)")
     if status.state == "succeeded":
-        st.success("The analysis finished. Next step (Prompt 3): read results.json from the folder below and show it here.")
-        st.code(status.output or "(the notebook returned no output)", language="json")
+        results_view.show_results(run_id, status)
 
 
 @st.fragment(run_every=3)                                # re-runs only this block every 3 seconds

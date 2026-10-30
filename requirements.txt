@@ -3,3 +3,4 @@
 streamlit>=1.37
 databricks-sdk>=0.40.0
 pandas
+matplotlib            # colour scales in the results tables (pandas Styler.background_gradient)

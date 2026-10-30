@@ -219,3 +219,44 @@ def get_run_status(run_id: int) -> RunStatus:
 
 def cancel_run(run_id: int) -> None:
     app_client().jobs.cancel_run(run_id=run_id)
+
+
+# =====================================================================================================
+# 6. Read a finished run's results
+# =====================================================================================================
+def _results_file(results_path: str) -> str:
+    """The notebook's exit value is DATA, not an instruction: only ever read results.json from a folder under RESULTS_ROOT."""
+    root = os.environ["RESULTS_ROOT"].rstrip("/") + "/"
+    folder = (results_path or "").strip().rstrip("/")
+    if not folder.startswith(root) or len(folder) <= len(root) or ".." in folder.split("/"):
+        raise ValueError(f"results_path {results_path!r} is not a folder inside {root}")
+    return folder + "/results.json"
+
+
+@st.cache_data(ttl=3600, show_spinner=False)          # a finished run never changes, so cache it for an hour
+def read_results(results_path: str) -> dict:
+    """Download results.json from the Volume (apps cannot open /Volumes paths directly; they must use the Files API)."""
+    response = app_client().files.download(_results_file(results_path))
+    try:
+        data = json.loads(response.contents.read())
+    finally:
+        close = getattr(response.contents, "close", None)
+        if close:
+            close()
+    if not isinstance(data, dict):
+        raise ValueError("results.json does not contain a JSON object")
+    return data
+
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def export_run_html(run_id: int) -> str:
+    """The notebook as it ran, with all outputs, as one HTML document (Jobs run export API)."""
+    w = app_client()
+    run = w.jobs.get_run(run_id=run_id)
+    task_run_id = run.tasks[0].run_id if run.tasks else run_id      # exports and outputs live on the TASK run
+    views = w.jobs.export_run(run_id=task_run_id).views or []       # views_to_export defaults to CODE = the notebook view
+    notebook_views = [v for v in views if getattr(v.type, "value", v.type) == "NOTEBOOK"]
+    chosen = notebook_views or views
+    if not chosen:
+        raise RuntimeError("Databricks returned no exported view for this run (run results expire after 60 days)")
+    return chosen[0].content
